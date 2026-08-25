@@ -2,12 +2,10 @@
 """Recover Smash Remix + EXTRA 0.5.0 fighter file layouts from a user ROM.
 
 The final ROM contains one generated N64 Character/FTData-like struct for each
-EXTRA fighter. This tool identifies those structs by their stable layout rather
-than hard-coding physical ROM offsets, then emits metadata only (IDs/offsets),
-never asset payload bytes.
-
-It is version-pinned to the target ROM used by the Android native port. The
-output can be compared with port/remix_fighters.cpp when upgrading profiles.
+EXTRA fighter. This tool identifies those structs by their stable layout and
+then verifies each one against Character.STRUCT_TABLE, so reserved
+ADD_CHARACTERS capacity can never be mistaken for actually-created FTKind rows.
+It emits metadata only and never writes asset payload bytes.
 """
 from __future__ import annotations
 
@@ -21,6 +19,12 @@ EXPECTED_SHA1 = "b9aa8800f9676e6edc454ec3cf9790ab2c229cac"
 EXPECTED_SIZE = 80_312_584
 RELOC_FILE_COUNT = 7_479
 
+# Character.asm constants / target-profile mapping.
+CHARACTER_STRUCT_TABLE_ROM = 0x0009_2610
+PATCH_RAM_ROM_DELTA = 0x7CC0_0000
+EXTRA_FKIND_FIRST = 0x4D
+EXTRA_FKIND_LAST = 0x5F
+
 # EXTRA source/patch code for this exact build lives in this ROM window. Using
 # the window avoids an unnecessary 80 MiB Python word-by-word scan while the
 # structural checks below still uniquely select the 19 character structs.
@@ -33,13 +37,37 @@ EXTRA_FIGHTERS = [
     "MetaKnight", "Rebecca", "Ryu", "Snake", "Spiderman", "Terry", "YZelda",
 ]
 
+assert EXTRA_FKIND_LAST - EXTRA_FKIND_FIRST + 1 == len(EXTRA_FIGHTERS)
+
 
 def sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
+def be32(data: bytes, off: int) -> int:
+    return struct.unpack_from(">I", data, off)[0]
+
+
 def is_runtime_ptr(value: int) -> bool:
     return 0x8000_0000 <= value < 0x8100_0000
+
+
+def struct_runtime_address(rom_offset: int) -> int:
+    return rom_offset + PATCH_RAM_ROM_DELTA
+
+
+def verify_struct_table_entry(rom: bytes, fkind: int, rom_offset: int) -> None:
+    table_off = CHARACTER_STRUCT_TABLE_ROM + fkind * 4
+    if table_off + 4 > len(rom):
+        raise SystemExit(f"FTKind 0x{fkind:02X}: STRUCT_TABLE read outside ROM")
+    table_ptr = be32(rom, table_off)
+    expected = struct_runtime_address(rom_offset)
+    if table_ptr != expected:
+        raise SystemExit(
+            f"FTKind 0x{fkind:02X}: STRUCT_TABLE mismatch: "
+            f"got 0x{table_ptr:08X}, expected 0x{expected:08X} "
+            f"for ROM struct 0x{rom_offset:08X}"
+        )
 
 
 def find_structs(rom: bytes) -> list[dict]:
@@ -108,13 +136,19 @@ def main() -> int:
         )
 
     for index, (name, row) in enumerate(zip(EXTRA_FIGHTERS, structs)):
+        fkind = EXTRA_FKIND_FIRST + index
+        verify_struct_table_entry(rom, fkind, row["rom_offset"])
         row["name"] = name
-        row["fkind"] = 0x61 + index
+        row["fkind"] = fkind
+        row["struct_table_rom_offset"] = CHARACTER_STRUCT_TABLE_ROM + fkind * 4
+        row["struct_runtime_address"] = struct_runtime_address(row["rom_offset"])
 
     # Strong anchor from the independently recovered Meta Knight source files.
     meta = structs[EXTRA_FIGHTERS.index("MetaKnight")]
+    if meta["fkind"] != 0x59:
+        raise SystemExit("Meta Knight FTKind anchor mismatch")
     if (meta["main_file_id"], meta["character_file_id"]) != (6730, 6731):
-        raise SystemExit("Meta Knight anchor mismatch; refusing ambiguous catalog")
+        raise SystemExit("Meta Knight file anchor mismatch; refusing ambiguous catalog")
 
     print(
         json.dumps(
@@ -122,6 +156,9 @@ def main() -> int:
                 "profile": "Smash Remix 2.0.1 + EXTRA 0.5.0",
                 "sha1": got_sha1,
                 "fighter_count": len(structs),
+                "fkind_first": EXTRA_FKIND_FIRST,
+                "fkind_last": EXTRA_FKIND_LAST,
+                "character_struct_table_rom": CHARACTER_STRUCT_TABLE_ROM,
                 "fighters": structs,
             },
             indent=2,
