@@ -10,30 +10,35 @@ extern "C" {
 /*
  * Smash Remix 2.0.1 + EXTRA 0.5.0 fighter IDs.
  *
- * Smash Remix 2.0.1 occupies IDs through 0x60. +EXTRA 0.5.0 sorts
- * extra_characters/ alphabetically before invoking define_character(), so
- * these additions begin at 0x61 in the stable order below.
+ * IMPORTANT: Character.ADD_CHARACTERS is reserved table capacity, not the
+ * number of Character.define_character calls that already exist. +EXTRA
+ * inserts its alphabetically-sorted definitions immediately after the last
+ * actually-created Smash Remix fighter. In the verified final 0.5.0 ROM the
+ * 19 EXTRA rows occupy Character.STRUCT_TABLE indices 0x4D..0x5F.
+ *
+ * These IDs are verified against the final ROM's table at ROM 0x00092610;
+ * do not derive them from NUM_CHARACTERS/ADD_CHARACTERS.
  */
 typedef enum PortRemixExtraFighterKind {
-    PORT_REMIX_FKIND_BIRDO        = 0x61,
-    PORT_REMIX_FKIND_CB_KNUCKLES  = 0x62,
-    PORT_REMIX_FKIND_CBM_KNUCKLES = 0x63,
-    PORT_REMIX_FKIND_CLOUD        = 0x64,
-    PORT_REMIX_FKIND_DK_ULT       = 0x65,
-    PORT_REMIX_FKIND_KAZUYA       = 0x66,
-    PORT_REMIX_FKIND_KEN          = 0x67,
-    PORT_REMIX_FKIND_KNUCKLES     = 0x68,
-    PORT_REMIX_FKIND_M_KNUCKLES   = 0x69,
-    PORT_REMIX_FKIND_MR_GAW       = 0x6A,
-    PORT_REMIX_FKIND_MR_GAW_PLUS  = 0x6B,
-    PORT_REMIX_FKIND_MR_GAW_3D    = 0x6C,
-    PORT_REMIX_FKIND_META_KNIGHT  = 0x6D,
-    PORT_REMIX_FKIND_REBECCA      = 0x6E,
-    PORT_REMIX_FKIND_RYU          = 0x6F,
-    PORT_REMIX_FKIND_SNAKE        = 0x70,
-    PORT_REMIX_FKIND_SPIDERMAN    = 0x71,
-    PORT_REMIX_FKIND_TERRY        = 0x72,
-    PORT_REMIX_FKIND_YOUNG_ZELDA  = 0x73,
+    PORT_REMIX_FKIND_BIRDO        = 0x4D,
+    PORT_REMIX_FKIND_CB_KNUCKLES  = 0x4E,
+    PORT_REMIX_FKIND_CBM_KNUCKLES = 0x4F,
+    PORT_REMIX_FKIND_CLOUD        = 0x50,
+    PORT_REMIX_FKIND_DK_ULT       = 0x51,
+    PORT_REMIX_FKIND_KAZUYA       = 0x52,
+    PORT_REMIX_FKIND_KEN          = 0x53,
+    PORT_REMIX_FKIND_KNUCKLES     = 0x54,
+    PORT_REMIX_FKIND_M_KNUCKLES   = 0x55,
+    PORT_REMIX_FKIND_MR_GAW       = 0x56,
+    PORT_REMIX_FKIND_MR_GAW_PLUS  = 0x57,
+    PORT_REMIX_FKIND_MR_GAW_3D    = 0x58,
+    PORT_REMIX_FKIND_META_KNIGHT  = 0x59,
+    PORT_REMIX_FKIND_REBECCA      = 0x5A,
+    PORT_REMIX_FKIND_RYU          = 0x5B,
+    PORT_REMIX_FKIND_SNAKE        = 0x5C,
+    PORT_REMIX_FKIND_SPIDERMAN    = 0x5D,
+    PORT_REMIX_FKIND_TERRY        = 0x5E,
+    PORT_REMIX_FKIND_YOUNG_ZELDA  = 0x5F,
 } PortRemixExtraFighterKind;
 
 /* Vanilla FTKind values used as the temporary native parent while a synth's
