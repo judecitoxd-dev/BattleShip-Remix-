@@ -2,10 +2,10 @@
 """Validate the native FTData/motion import assumptions for EXTRA 0.5.0.
 
 This is a metadata-only verifier. It reads the user-owned final ROM, discovers
-all 19 generated Character structs, validates both motion tables for every
-fighter, checks every animation file id against the expanded RELOC table and
-classifies every N64 motion offset exactly the way port/remix_fighters.cpp does.
-No ROM payload bytes are written anywhere.
+all 19 generated Character structs, verifies their true FTKind rows through
+Character.STRUCT_TABLE, validates both motion tables, checks animation file ids
+against the expanded RELOC table and classifies every N64 motion offset exactly
+the way port/remix_fighters.cpp does. No ROM payload bytes are written anywhere.
 """
 from __future__ import annotations
 
@@ -18,13 +18,15 @@ from catalog_extra_fighter_structs import (
     EXPECTED_SHA1,
     EXPECTED_SIZE,
     EXTRA_FIGHTERS,
+    EXTRA_FKIND_FIRST,
+    EXTRA_FKIND_LAST,
     RELOC_FILE_COUNT,
     find_structs,
     sha1,
+    verify_struct_table_entry,
 )
 
 RELOC_TABLE_ROM_OFFSET = 0x001AC870
-RELOC_DATA_ROM_OFFSET = 0x001C2710
 PATCH_RAM_ROM_DELTA = 0x7CC00000
 MOTION_RAW_BASE = 0x805C0000
 MOTION_RAW_END = 0x80610000
@@ -153,6 +155,13 @@ def main() -> int:
     fighters: list[dict] = []
 
     for index, (name, row) in enumerate(zip(EXTRA_FIGHTERS, structs)):
+        fkind = EXTRA_FKIND_FIRST + index
+        fighter_errors: list[str] = []
+        try:
+            verify_struct_table_entry(rom, fkind, row["rom_offset"])
+        except SystemExit as exc:
+            fighter_errors.append(str(exc))
+
         off = row["rom_offset"]
         attributes_offset = be32(rom, off + 0x60)
         main_ptr = be32(rom, off + 0x64)
@@ -163,12 +172,11 @@ def main() -> int:
         sub_count_rom = patch_ptr_to_rom(sub_count_ptr)
         if sub_count_rom is None or sub_count_rom + 4 > len(rom):
             sub_count = 0
-            fighter_errors = [
+            fighter_errors.append(
                 f"{name}: invalid submotion count pointer 0x{sub_count_ptr:08X}"
-            ]
+            )
         else:
             sub_count = be32(rom, sub_count_rom)
-            fighter_errors = []
 
         main_stats, errors = validate_motion_table(
             rom, name, "mainmotion", main_ptr, main_count
@@ -184,7 +192,7 @@ def main() -> int:
         fighters.append(
             {
                 "name": name,
-                "fkind": 0x61 + index,
+                "fkind": fkind,
                 "character_struct_rom_offset": off,
                 "attributes_offset": attributes_offset,
                 "mainmotion_count": main_count,
@@ -198,6 +206,8 @@ def main() -> int:
         "profile": "smash-remix-2.0.1+extra-0.5.0",
         "rom_sha1": got_sha1,
         "fighter_count": len(fighters),
+        "fkind_first": EXTRA_FKIND_FIRST,
+        "fkind_last": EXTRA_FKIND_LAST,
         "reloc_file_count": RELOC_FILE_COUNT,
         "motion_raw_base": MOTION_RAW_BASE,
         "motion_raw_end": MOTION_RAW_END,
