@@ -8,18 +8,22 @@ extern "C" {
 #endif
 
 /*
- * Smash Remix + EXTRA 0.5.0 stores many action-script pointers as absolute
- * N64 virtual addresses in the generated fighter motion tables. Android/PC
- * cannot dereference those addresses directly, so this module materializes
- * the known script window into native memory and exposes it through the
- * RelocPointerTable raw-address alias bridge.
+ * Smash Remix 2.0.1 + EXTRA 0.5.0 stores generated action-script pointers as
+ * absolute N64 virtual addresses. Android/PC cannot dereference those
+ * addresses directly, so this module materializes the verified script window
+ * into native memory and exposes it through the RelocPointerTable raw-address
+ * alias bridge.
  *
- * These constants are pinned to the verified target ROM profile.
+ * The original EXTRA-only bring-up used 0x805C0000..0x80610000. Direct
+ * validation of every generated Character row 0x1D..0x73 showed that Smash
+ * Remix base additionally uses script pointers down to 0x805762FC. The
+ * profile window is therefore rounded down to 0x80570000 so the same native
+ * importer can cover Remix base, EXTRA and the Remix polygon rows.
  */
 #define REMIX_EXTRA_PATCH_RAM_ROM_DELTA 0x7CC00000u
-#define REMIX_EXTRA_MOTION_RAW_BASE     0x805C0000u
+#define REMIX_EXTRA_MOTION_RAW_BASE     0x80570000u
 #define REMIX_EXTRA_MOTION_RAW_END      0x80610000u
-#define REMIX_EXTRA_MOTION_ROM_BASE     0x039C0000u
+#define REMIX_EXTRA_MOTION_ROM_BASE     0x03970000u
 #define REMIX_EXTRA_MOTION_ARENA_SIZE   (REMIX_EXTRA_MOTION_RAW_END - REMIX_EXTRA_MOTION_RAW_BASE)
 
 /* Initialize the persistent BE->native motion-data arena and register its
