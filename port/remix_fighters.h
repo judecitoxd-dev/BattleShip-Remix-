@@ -37,6 +37,18 @@ typedef enum PortRemixExtraFighterKind {
     PORT_REMIX_FKIND_YOUNG_ZELDA  = 0x73,
 } PortRemixExtraFighterKind;
 
+/*
+ * Exact RELOC IDs for Meta Knight in the target ROM profile:
+ * Smash Remix 2.0.1 + EXTRA 0.5.0.
+ *
+ * These are deliberately version-pinned. Do not reuse them for +EXTRA 0.6.x
+ * without re-generating the profile from that ROM/source tree.
+ */
+enum {
+    PORT_REMIX_FILE_META_KNIGHT_MAIN      = 6730,
+    PORT_REMIX_FILE_META_KNIGHT_CHARACTER = 6731,
+};
+
 /* Register built-in Remix/+EXTRA fighter descriptors after the vanilla
  * registry has been seeded. Unlike TCC MOD_INIT this path is compiled on
  * Android too. */
