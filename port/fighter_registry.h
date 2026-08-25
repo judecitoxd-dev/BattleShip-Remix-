@@ -345,6 +345,18 @@ void  port_fighter_seed_vanilla(void);
 
 #ifdef __cplusplus
 }
+
+/* Built-in Remix/+EXTRA seeding is compiled into Android, unlike TCC mods.
+ * Keep the decomp's C implementation of port_fighter_seed_vanilla untouched;
+ * C++ call sites transparently chain the native Remix seed immediately after
+ * the 27 vanilla rows exist. */
+extern "C" void port_remix_seed_fighters(void);
+static inline void port_fighter_seed_vanilla_with_remix(void)
+{
+    port_fighter_seed_vanilla();
+    port_remix_seed_fighters();
+}
+#define port_fighter_seed_vanilla() port_fighter_seed_vanilla_with_remix()
 #endif
 
 #endif /* PORT_FIGHTER_REGISTRY_H */
