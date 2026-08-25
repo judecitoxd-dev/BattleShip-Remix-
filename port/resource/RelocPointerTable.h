@@ -24,48 +24,43 @@
 extern "C" {
 #endif
 
-/**
- * Register a 64-bit pointer and get back a 32-bit token.
- * Passing NULL returns 0 (the NULL token).
- */
+/** Register a 64-bit pointer and get back a 32-bit token. NULL -> 0. */
 uint32_t portRelocRegisterPointer(void *ptr);
 
-/**
- * Resolve a 32-bit token back to a 64-bit pointer.
- * Token 0 returns NULL.
- */
+/** Resolve a 32-bit token back to a 64-bit pointer. Token 0 -> NULL. */
 void *portRelocResolvePointer(uint32_t token);
 void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line);
 
 /**
- * Try to resolve a token without logging when the value is not registered.
- * This is useful for consumers that must distinguish reloc tokens from
- * other 32-bit address encodings such as N64 segmented addresses.
+ * Try to resolve without logging when the value is not registered.
+ * Useful when a 32-bit field can be a token or another address encoding.
  */
 void *portRelocTryResolvePointer(uint32_t token);
 
 /**
- * Reset the token table (hard wipe — clears all slots, resets free list).
+ * Register a persistent raw 32-bit address range as an alias of native host
+ * memory. This is for ROM-authored N64 virtual addresses which survive in
+ * generated data (Smash Remix action scripts are the first consumer).
  *
- * Historically called from lbRelocInitSetup() on every scene boundary,
- * which invalidated tokens for intern-buffer files that persist across
- * scenes (mainmotion, submotion, model, special1-4, shieldpose) — the
- * source of the variant-1/2/3 stale-data crash family. With the per-slot
- * generational model this wholesale reset is no longer needed for normal
- * scene cycling; use portRelocInvalidateRange() instead. Kept for
- * diagnostic or test paths that need to discard all token state.
+ * A value raw_base + N passed to portRelocResolvePointer/PORT_RESOLVE resolves
+ * to host_base + N. Raw aliases are checked before generational tokens so an
+ * N64 address can never be mistaken for a coincidentally-shaped token.
+ *
+ * The caller owns host_base and must keep it alive for the lifetime of the
+ * registration. Registrations are expected during boot/content init and are
+ * read-only afterwards. Overlapping ranges are rejected. Returns 1 on success.
  */
+int portRelocRegisterRawAddressRange(uint32_t raw_base,
+                                     void *host_base,
+                                     size_t size);
+
+/** Hard wipe of the generational token table. Persistent raw aliases survive. */
 void portRelocResetPointerTable(void);
 
 /**
- * Selectively invalidate slots whose stored pointer falls in [base, base+size).
- * Each affected slot is NULLed and its generation bumped so stale tokens
- * fail decode; the slot index is recycled via an internal free list.
- *
- * Called from port_taskman_evict_arena_caches() with the scene-arena
- * range so tokens for arena-allocated data become stale at exactly the
- * point that data is freed, while tokens pointing at the intern buffer
- * (which survives the scene transition) remain valid.
+ * Selectively invalidate token slots whose stored host pointer falls in
+ * [base, base+size). Persistent raw aliases are not scene-arena allocations
+ * and therefore are not affected by this operation.
  */
 void portRelocInvalidateRange(const void *base, size_t size);
 
@@ -73,8 +68,4 @@ void portRelocInvalidateRange(const void *base, size_t size);
 }
 #endif
 
-/**
- * Macro for game code to resolve a token stored in a struct field.
- * Usage: void *ptr = RELOC_RESOLVE(dobjdesc->dl_token);
- */
 #define RELOC_RESOLVE(token) portRelocResolvePointer((uint32_t)(token))

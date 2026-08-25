@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <vector>
 #include <spdlog/spdlog.h>
 
@@ -11,64 +12,44 @@
  * Token layout: [12 bits slot-generation][20 bits slot-index]
  *   - Slot generations are PER-SLOT, not global. Each slot starts at gen 1
  *     and bumps on every release (reuse). A token resolves only if its
- *     embedded gen matches the slot's current gen — stale tokens (whose
- *     slot has been reused) fail decode and resolve to NULL.
- *   - 1M indices, 4096 generations per slot — effectively infinite reuse
- *     headroom in any realistic session.
+ *     embedded gen matches the slot's current gen — stale tokens fail decode.
+ *   - 1M indices, 4096 generations per slot.
  *
- * Why per-slot instead of global gen:
- *   Earlier design bumped a single global gen on every scene reset and
- *   memset'd the entire table. That invalidated tokens for files in the
- *   intern buffer (mainmotion, submotion, model, special1-4, shieldpose)
- *   which legitimately persist across scenes — their underlying memory is
- *   still valid, but the tokens encoding it had a stale gen. Downstream
- *   resolvers returned NULL, downstream consumers (gcSetupCustomDObjs,
- *   ftMainSetStatus joint init, etc.) didn't always NULL-check, and
- *   crashed. With per-slot gens we never artificially invalidate a slot
- *   whose memory is still live; portRelocInvalidateRange() selectively
- *   bumps only those slots whose backing pointer falls in a recycled
- *   memory range (scene arena, freed reloc file, etc.).
- *
- * Recovery: invalidated slots go on a free list; subsequent registrations
- * pull from it before extending sNextIndex. The table doesn't grow without
- * bound across long sessions.
+ * A second, deliberately small mapping handles persistent raw N64 virtual
+ * address ranges. Smash Remix generated action tables retain absolute N64
+ * pointers; those values must map to native materialized data instead of being
+ * interpreted as generational tokens on 64-bit hosts.
  */
 
 namespace {
 
 struct Slot {
     void *ptr;
-    uint32_t gen;        /* 0 = unregistered (token gen=0 always invalid).
-                          * 1..GEN_MAX = registered; reuse bumps. */
+    uint32_t gen;
+};
+
+struct RawAddressRange {
+    uint32_t raw_base;
+    uint64_t raw_end;
+    uint8_t *host_base;
 };
 
 constexpr uint32_t TOKEN_GENERATION_SHIFT = 20;
-constexpr uint32_t TOKEN_INDEX_MASK       = 0x000FFFFFu;       /* 20 bits = 1M-1 */
-constexpr uint32_t TOKEN_GENERATION_MAX   = 0xFFFu;            /* 12 bits */
-constexpr uint32_t INITIAL_CAPACITY       = 256 * 1024;        /* ~4 MB initial. */
+constexpr uint32_t TOKEN_INDEX_MASK       = 0x000FFFFFu;
+constexpr uint32_t TOKEN_GENERATION_MAX   = 0xFFFu;
+constexpr uint32_t INITIAL_CAPACITY       = 256 * 1024;
 
 static Slot     *sSlots       = nullptr;
-static uint32_t  sNextIndex   = 1;                              /* Index 0 reserved. */
+static uint32_t  sNextIndex   = 1;
 static uint32_t  sCapacity    = 0;
-
-/* Free list of indices whose slots were invalidated (memset to NULL via
- * portRelocInvalidateRange). Reused FIFO-ish so that recently-freed
- * tokens don't collide with brand-new ones in test scenarios. Vector is
- * a small overhead per slot but the simplicity is worth it. */
 static std::vector<uint32_t> sFreeIndices;
+static std::vector<RawAddressRange> sRawAddressRanges;
 
 static void ensureCapacity(void)
 {
     if (sSlots == nullptr) {
         sCapacity = INITIAL_CAPACITY;
         sSlots = (Slot *)calloc(sCapacity, sizeof(Slot));
-        /* DIAG (SSB64_RELOC_GEN_SEED=<n>): pre-age every slot's generation.
-         * Token top byte = gen >> 4, so gens 16..31 mint 0x01xxxxxx tokens
-         * (G_VTX opcode) and 4048..4063 mint 0xFDxxxxxx (SETTIMG) — the
-         * bands where a tokenized chain slot masquerades as a GBI command
-         * to the chain-walk texture/vertex fixup. Seeding 15 arms the
-         * G_VTX band from the very first registration instead of after
-         * ~13 scene transitions. Zero cost when unset. */
         if (sSlots != nullptr) {
             const char *seed_env = getenv("SSB64_RELOC_GEN_SEED");
             if (seed_env != nullptr) {
@@ -102,8 +83,6 @@ static void ensureCapacity(void)
 
 static uint32_t bumpSlotGeneration(uint32_t gen)
 {
-    /* gen 0 reserved for "unregistered". Bump to 1 on first register;
-     * cycle 1..TOKEN_GENERATION_MAX with wrap back to 1. */
     if (gen == 0) return 1;
     if (gen >= TOKEN_GENERATION_MAX) return 1;
     return gen + 1;
@@ -131,6 +110,17 @@ static bool decodeToken(uint32_t token, uint32_t *outIndex)
     return true;
 }
 
+static void *resolveRawAddress(uint32_t raw_address)
+{
+    const uint64_t address = static_cast<uint64_t>(raw_address);
+    for (const RawAddressRange& range : sRawAddressRanges) {
+        if (address >= range.raw_base && address < range.raw_end) {
+            return range.host_base + static_cast<size_t>(address - range.raw_base);
+        }
+    }
+    return nullptr;
+}
+
 } /* namespace */
 
 extern "C" {
@@ -145,12 +135,9 @@ uint32_t portRelocRegisterPointer(void *ptr)
     uint32_t index;
     uint32_t gen;
     if (!sFreeIndices.empty()) {
-        /* Reuse a previously-invalidated slot. The slot's gen has already
-         * been bumped on invalidation; we just set the ptr. */
         index = sFreeIndices.back();
         sFreeIndices.pop_back();
         if (sSlots[index].gen == 0) {
-            /* Shouldn't happen — invalidation bumps gen — but recover. */
             sSlots[index].gen = 1;
         }
         gen = sSlots[index].gen;
@@ -164,6 +151,51 @@ uint32_t portRelocRegisterPointer(void *ptr)
     return makeToken(index, gen);
 }
 
+int portRelocRegisterRawAddressRange(uint32_t raw_base,
+                                     void *host_base,
+                                     size_t size)
+{
+    if (raw_base == 0 || host_base == nullptr || size == 0) {
+        return 0;
+    }
+
+    const uint64_t start = static_cast<uint64_t>(raw_base);
+    const uint64_t end = start + static_cast<uint64_t>(size);
+    if (end > 0x100000000ULL || end <= start) {
+        spdlog::error("RelocPointerTable: invalid raw range base=0x{:08X} size={}",
+                      raw_base, size);
+        return 0;
+    }
+
+    for (RawAddressRange& range : sRawAddressRanges) {
+        const bool same = (range.raw_base == raw_base && range.raw_end == end);
+        if (same) {
+            range.host_base = static_cast<uint8_t *>(host_base);
+            return 1;
+        }
+
+        const bool overlaps = (start < range.raw_end) &&
+                              (end > static_cast<uint64_t>(range.raw_base));
+        if (overlaps) {
+            spdlog::error(
+                "RelocPointerTable: refusing overlapping raw ranges 0x{:08X}..0x{:08X} and 0x{:08X}..0x{:08X}",
+                raw_base, static_cast<uint32_t>(end - 1),
+                range.raw_base, static_cast<uint32_t>(range.raw_end - 1));
+            return 0;
+        }
+    }
+
+    sRawAddressRanges.push_back({
+        raw_base,
+        end,
+        static_cast<uint8_t *>(host_base)
+    });
+
+    spdlog::info("RelocPointerTable: raw alias 0x{:08X}..0x{:08X} -> {} bytes",
+                 raw_base, static_cast<uint32_t>(end - 1), size);
+    return 1;
+}
+
 void *portRelocResolvePointer(uint32_t token)
 {
     return portRelocResolvePointerDebug(token, nullptr, 0);
@@ -174,13 +206,16 @@ void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line)
     if (token == 0) {
         return nullptr;
     }
+
+    /* Raw N64 aliases take precedence. A value in a registered patch window
+     * is an address, even if its bit pattern could also decode as a very old
+     * generational token after thousands of slot reuses. */
+    if (void *raw = resolveRawAddress(token); raw != nullptr) {
+        return raw;
+    }
+
     uint32_t index = 0;
     if (!decodeToken(token, &index)) {
-        /* Rate-limit: an APPEAR figatree binding pass can resolve the same
-         * stale token thousands of times per frame (each joint stream re-
-         * checks). spdlog flushes on error so unrate-limited logging stalls
-         * the main thread. Cap to one log per 1024 misses; the message is
-         * the same value anyway. */
         static uint32_t sStaleLogCount = 0;
         if ((sStaleLogCount++ & 0x3FF) == 0) {
             uint32_t tokenGen   = token >> TOKEN_GENERATION_SHIFT;
@@ -203,6 +238,13 @@ void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line)
 
 void *portRelocTryResolvePointer(uint32_t token)
 {
+    if (token == 0) {
+        return nullptr;
+    }
+    if (void *raw = resolveRawAddress(token); raw != nullptr) {
+        return raw;
+    }
+
     uint32_t index = 0;
     if (!decodeToken(token, &index)) {
         return nullptr;
@@ -210,15 +252,6 @@ void *portRelocTryResolvePointer(uint32_t token)
     return sSlots[index].ptr;
 }
 
-/**
- * Selectively invalidate slots whose pointer falls in [base, base+size).
- * Each invalidated slot has its ptr cleared and gen bumped; the slot
- * index is pushed onto the free list for reuse.
- *
- * Called from port_taskman_evict_arena_caches with the scene arena range
- * — tokens for arena-backed data become stale, tokens for intern-buffer
- * data (which persists across scenes) remain valid.
- */
 void portRelocInvalidateRange(const void *base, size_t size)
 {
     if (sSlots == nullptr || base == nullptr || size == 0) {
@@ -227,7 +260,7 @@ void portRelocInvalidateRange(const void *base, size_t size)
     uintptr_t lo = reinterpret_cast<uintptr_t>(base);
     uintptr_t hi = lo + size;
     for (uint32_t i = 1; i < sNextIndex; ++i) {
-        if (sSlots[i].gen == 0) continue;       /* already free */
+        if (sSlots[i].gen == 0) continue;
         uintptr_t p = reinterpret_cast<uintptr_t>(sSlots[i].ptr);
         if (p >= lo && p < hi) {
             sSlots[i].ptr = nullptr;
@@ -237,21 +270,6 @@ void portRelocInvalidateRange(const void *base, size_t size)
     }
 }
 
-/**
- * Legacy whole-table reset. Now a no-op for the common scene-reset path
- * because invalidation is range-based via portRelocInvalidateRange().
- * Kept as a public API for diagnostic or test paths that want a hard
- * reset (e.g. switching ROMs); when called, it clears all slots and
- * resets the free list.
- *
- * Existing callers in lbRelocInitSetup() and friends used to call this
- * on every scene init. With the per-slot model, that wholesale reset
- * is the source of the variant-1/2/3 crash family (it invalidated
- * tokens for files still loaded in the intern buffer). The fix is to
- * stop calling this from scene-init paths; the range-based invalidator
- * does the right thing for scene-arena recycling, and persistent
- * intern-buffer file tokens stay valid.
- */
 void portRelocResetPointerTable(void)
 {
     if (sSlots != nullptr) {
@@ -259,6 +277,8 @@ void portRelocResetPointerTable(void)
     }
     sNextIndex = 1;
     sFreeIndices.clear();
+    /* Persistent raw aliases intentionally survive: their caller-owned backing
+     * storage is process-lifetime data, not scene-arena memory. */
 }
 
 } /* extern "C" */
