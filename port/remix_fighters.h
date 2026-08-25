@@ -50,16 +50,9 @@ typedef enum PortVanillaFighterKind {
     PORT_VANILLA_FKIND_NESS        = 11,
 } PortVanillaFighterKind;
 
-/* Version-pinned asset IDs already verified against the target 0.5.0 ROM. */
-enum {
-    PORT_REMIX_FILE_META_KNIGHT_MAIN      = 6730,
-    PORT_REMIX_FILE_META_KNIGHT_CHARACTER = 6731,
-};
-
-/* Source-of-truth row for the +EXTRA 0.5.0 roster. The declared costume
- * count is intentionally separate from FighterDescriptor::costume_count:
- * until a fighter's real model is wired, the descriptor stays in safe
- * parent-clone mode and must not request costume frames the parent lacks. */
+/* Source-of-truth row for the +EXTRA 0.5.0 roster. The nine file IDs mirror
+ * Character.define_character's N64 file layout, but are stored in native
+ * metadata instead of reusing the original 32-bit-pointer FTData blob. */
 typedef struct PortRemixExtraFighterInfo {
     int fkind;
     int parent_fkind;
@@ -72,14 +65,17 @@ typedef struct PortRemixExtraFighterInfo {
     float results_name_scale;
     float results_wins_lx;
 
-    /* 0 until the exact 0.5.0 RELOC IDs have been verified. */
     int main_file_id;
+    int primary_file_id;
+    int secondary_file_id;
     int character_file_id;
+    int shield_file_id;
+    int misc_file_id[4];
 } PortRemixExtraFighterInfo;
 
 /* Register built-in Remix/+EXTRA fighter descriptors after the vanilla
  * registry has been seeded. Unlike TCC MOD_INIT this path is compiled on
- * Android too. */
+ * Android too. No EXTRA rows are exposed when the reference ROM is absent. */
 void port_remix_seed_fighters(void);
 
 /* Table accessors used by CSS, asset binding and diagnostics. */
@@ -87,6 +83,10 @@ int port_remix_extra_fighter_count(void);
 const PortRemixExtraFighterInfo* port_remix_extra_fighter_at(int index);
 const PortRemixExtraFighterInfo* port_remix_extra_fighter_info(int fkind);
 int port_remix_extra_is_fighter(int fkind);
+
+/* Validate every non-zero file ID used by the 19 target fighters against the
+ * expanded 0.5.0 RELOC table. Returns the number of completely valid rows. */
+int port_remix_extra_validate_fighter_assets(void);
 
 #ifdef __cplusplus
 }
