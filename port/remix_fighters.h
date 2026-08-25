@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,6 +53,20 @@ typedef enum PortVanillaFighterKind {
     PORT_VANILLA_FKIND_NESS        = 11,
 } PortVanillaFighterKind;
 
+/* Stable native slots for the nine file IDs emitted by Character.define_character. */
+typedef enum PortRemixExtraFighterAssetSlot {
+    PORT_REMIX_ASSET_MAIN = 0,
+    PORT_REMIX_ASSET_PRIMARY,
+    PORT_REMIX_ASSET_SECONDARY,
+    PORT_REMIX_ASSET_CHARACTER,
+    PORT_REMIX_ASSET_SHIELD,
+    PORT_REMIX_ASSET_MISC0,
+    PORT_REMIX_ASSET_MISC1,
+    PORT_REMIX_ASSET_MISC2,
+    PORT_REMIX_ASSET_MISC3,
+    PORT_REMIX_ASSET_COUNT,
+} PortRemixExtraFighterAssetSlot;
+
 /* Source-of-truth row for the +EXTRA 0.5.0 roster. The nine file IDs mirror
  * Character.define_character's N64 file layout, but are stored in native
  * metadata instead of reusing the original 32-bit-pointer FTData blob. */
@@ -83,6 +100,25 @@ int port_remix_extra_fighter_count(void);
 const PortRemixExtraFighterInfo* port_remix_extra_fighter_at(int index);
 const PortRemixExtraFighterInfo* port_remix_extra_fighter_info(int fkind);
 int port_remix_extra_is_fighter(int fkind);
+
+/* Resolve one Character.define_character file slot for a synth fighter.
+ * Returns 0 when the slot is intentionally absent and -1 for invalid input. */
+int port_remix_extra_fighter_asset_file_id(int fkind, int asset_slot);
+
+/* Query/validate/load a synth fighter file through the normal BattleShip
+ * relocation pipeline. These calls never expose raw ROM pointers. */
+size_t port_remix_extra_fighter_asset_size(int fkind, int asset_slot);
+int port_remix_extra_fighter_asset_available(int fkind, int asset_slot);
+int port_remix_extra_fighter_load_asset(int fkind,
+                                        int asset_slot,
+                                        void* destination,
+                                        uint32_t destination_size,
+                                        int file_location,
+                                        int force_figatree_fixup);
+
+/* Bit i is set when asset slot i exists in the target ROM and has a non-zero
+ * decompressed size. Useful for bulk bring-up and diagnostics. */
+uint32_t port_remix_extra_fighter_asset_mask(int fkind);
 
 /* Validate every non-zero file ID used by the 19 target fighters against the
  * expanded 0.5.0 RELOC table. Returns the number of completely valid rows. */
