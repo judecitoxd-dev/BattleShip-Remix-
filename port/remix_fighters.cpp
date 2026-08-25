@@ -5,6 +5,7 @@
 #include "remix_extra_motion.h"
 #include "remix_extra_reloc.h"
 #include "remix_extra_source.h"
+#include "remix_roster.h"
 
 #include <ft/fttypes.h>
 
@@ -14,6 +15,11 @@
 #include <vector>
 
 namespace {
+
+constexpr uint64_t kCharacterStructTableRom = 0x00092610ULL;
+constexpr int kGeneratedFKindFirst = 0x1D;
+constexpr int kGeneratedFKindLast = 0x73;
+constexpr int kGeneratedFighterCount = kGeneratedFKindLast - kGeneratedFKindFirst + 1;
 
 static const PortRemixExtraFighterInfo kExtraFighters[] = {
     { PORT_REMIX_FKIND_BIRDO,        PORT_VANILLA_FKIND_JIGGLYPUFF, "Birdo",       "Birdo",            6,  "Birdo",       45.0f, 0.75f, 180.0f, 0x154F, 0x00F6, 0, 0x1550, 0x0154, { 0x1551, 0,      0,      0      } },
@@ -37,20 +43,10 @@ static const PortRemixExtraFighterInfo kExtraFighters[] = {
     { PORT_REMIX_FKIND_YOUNG_ZELDA,  PORT_VANILLA_FKIND_FOX,        "YZelda",      "Young Zelda",      9,  "Young Zelda", 20.0f, 0.55f, 180.0f, 0x1CD5, 0x00D0, 0, 0x1CD6, 0x1CD9, { 0x1CD7, 0x015A, 0x00A1, 0x1CD8 } },
 };
 
-/* Physical ROM offsets of Character.define_character's generated 0x78-byte
- * structs in the exact target ROM. These are profile metadata, not asset data. */
-static const uint32_t kExtraCharacterStructRomOffsets[] = {
-    0x038E2120u, 0x038E2DE0u, 0x038E3D50u, 0x038E4CC0u, 0x038E5A70u,
-    0x038E68B0u, 0x038E78E0u, 0x038E88F0u, 0x038E9860u, 0x038EA7D0u,
-    0x038EB5C0u, 0x038EC3D0u, 0x038ED1E0u, 0x038EE050u, 0x038EEE10u,
-    0x038EFDC0u, 0x038F10F0u, 0x038F1EE0u, 0x038F2EB0u,
-};
-
 constexpr int kExtraFighterCount =
     static_cast<int>(sizeof(kExtraFighters) / sizeof(kExtraFighters[0]));
-static_assert(kExtraFighterCount ==
-              static_cast<int>(sizeof(kExtraCharacterStructRomOffsets) /
-                               sizeof(kExtraCharacterStructRomOffsets[0])));
+static_assert(kExtraFighterCount == 19);
+static_assert(kGeneratedFighterCount == 87);
 
 struct MotionImportStats {
     int sentinel = 0;
@@ -75,7 +71,7 @@ struct NativeFTDataRuntime {
     std::vector<FTMotionDesc> submotion;
 };
 
-NativeFTDataRuntime sNativeFTData[kExtraFighterCount]{};
+NativeFTDataRuntime sNativeFTData[kGeneratedFighterCount]{};
 
 static uint32_t ReadBE32(const uint8_t* p)
 {
@@ -94,6 +90,14 @@ static bool PatchPointerToRomOffset(uint32_t pointer, uint64_t* out_rom)
     return true;
 }
 
+static int GeneratedIndex(int fkind)
+{
+    if (fkind < kGeneratedFKindFirst || fkind > kGeneratedFKindLast) {
+        return -1;
+    }
+    return fkind - kGeneratedFKindFirst;
+}
+
 const PortRemixExtraFighterInfo* FindFighter(int fkind)
 {
     if (fkind < PORT_REMIX_FKIND_BIRDO || fkind > PORT_REMIX_FKIND_YOUNG_ZELDA) {
@@ -105,12 +109,6 @@ const PortRemixExtraFighterInfo* FindFighter(int fkind)
     }
     const PortRemixExtraFighterInfo* info = &kExtraFighters[index];
     return (info->fkind == fkind) ? info : nullptr;
-}
-
-int FighterIndex(int fkind)
-{
-    const PortRemixExtraFighterInfo* info = FindFighter(fkind);
-    return (info == nullptr) ? -1 : (fkind - PORT_REMIX_FKIND_BIRDO);
 }
 
 int ResolveAssetFileId(const PortRemixExtraFighterInfo& info, int slot)
@@ -129,8 +127,7 @@ int ResolveAssetFileId(const PortRemixExtraFighterInfo& info, int slot)
     }
 }
 
-bool ValidateRelocId(const PortRemixExtraFighterInfo& info,
-                     const char* slot_name, int file_id)
+bool ValidateRelocFileId(const char* name, const char* slot_name, int file_id)
 {
     if (file_id == 0) {
         return true;
@@ -138,12 +135,12 @@ bool ValidateRelocId(const PortRemixExtraFighterInfo& info,
     RemixExtraRelocInfo reloc{};
     if (!remix_extra_reloc_get_info(static_cast<uint32_t>(file_id), &reloc)) {
         port_log("SSB64 Remix: %s has invalid %s RELOC id 0x%04X\n",
-                 info.display_name, slot_name, file_id);
+                 name, slot_name, file_id);
         return false;
     }
     if (reloc.file_id != static_cast<uint32_t>(file_id) || reloc.decompressed_size == 0) {
         port_log("SSB64 Remix: %s %s RELOC 0x%04X has invalid metadata\n",
-                 info.display_name, slot_name, file_id);
+                 name, slot_name, file_id);
         return false;
     }
     return true;
@@ -152,18 +149,18 @@ bool ValidateRelocId(const PortRemixExtraFighterInfo& info,
 bool ValidateRowAssets(const PortRemixExtraFighterInfo& info)
 {
     bool ok = true;
-    ok &= ValidateRelocId(info, "main", info.main_file_id);
-    ok &= ValidateRelocId(info, "primary", info.primary_file_id);
-    ok &= ValidateRelocId(info, "secondary", info.secondary_file_id);
-    ok &= ValidateRelocId(info, "character", info.character_file_id);
-    ok &= ValidateRelocId(info, "shield", info.shield_file_id);
+    ok &= ValidateRelocFileId(info.display_name, "main", info.main_file_id);
+    ok &= ValidateRelocFileId(info.display_name, "primary", info.primary_file_id);
+    ok &= ValidateRelocFileId(info.display_name, "secondary", info.secondary_file_id);
+    ok &= ValidateRelocFileId(info.display_name, "character", info.character_file_id);
+    ok &= ValidateRelocFileId(info.display_name, "shield", info.shield_file_id);
     for (int i = 0; i < 4; ++i) {
-        ok &= ValidateRelocId(info, "misc", info.misc_file_id[i]);
+        ok &= ValidateRelocFileId(info.display_name, "misc", info.misc_file_id[i]);
     }
     return ok;
 }
 
-static intptr_t ImportMotionOffset(const PortRemixExtraFighterInfo& info,
+static intptr_t ImportMotionOffset(const char* display_name,
                                    const char* table_name,
                                    int motion_index,
                                    uint32_t raw_offset,
@@ -180,12 +177,11 @@ static intptr_t ImportMotionOffset(const PortRemixExtraFighterInfo& info,
         if (stats != nullptr) stats->relative++;
         return static_cast<intptr_t>(raw_offset);
     }
-
     if (remix_extra_motion_contains(raw_offset)) {
         void* host = remix_extra_motion_resolve(raw_offset);
         if (host == nullptr) {
             port_log("SSB64 Remix: %s %s[%d] cannot resolve motion address 0x%08X\n",
-                     info.display_name, table_name, motion_index, raw_offset);
+                     display_name, table_name, motion_index, raw_offset);
             if (ok != nullptr) *ok = false;
             return 0;
         }
@@ -193,10 +189,9 @@ static intptr_t ImportMotionOffset(const PortRemixExtraFighterInfo& info,
         return reinterpret_cast<intptr_t>(host);
     }
 
-    /* The generated arrays retain a handful of vanilla absolute script
-     * symbols (~0x8039xxxx). BattleShip already has native versions of those
-     * rows in the parent descriptor, so reuse the parent's translated offset
-     * instead of ever exposing an N64 code/data address to the host. */
+    /* Generated arrays retain a handful of vanilla absolute script symbols
+     * (~0x8039xxxx). BattleShip already has translated versions in each
+     * vanilla parent descriptor, so reuse the parent's native offset. */
     if (raw_offset > 0x80000000u && raw_offset < 0x80400000u &&
         parent_table != nullptr && motion_index >= 0 && motion_index < parent_count) {
         if (stats != nullptr) stats->parent_absolute++;
@@ -204,12 +199,12 @@ static intptr_t ImportMotionOffset(const PortRemixExtraFighterInfo& info,
     }
 
     port_log("SSB64 Remix: %s %s[%d] unsupported motion offset 0x%08X\n",
-             info.display_name, table_name, motion_index, raw_offset);
+             display_name, table_name, motion_index, raw_offset);
     if (ok != nullptr) *ok = false;
     return 0;
 }
 
-static bool ImportMotionTable(const PortRemixExtraFighterInfo& info,
+static bool ImportMotionTable(const char* display_name,
                               const char* table_name,
                               uint32_t patch_pointer,
                               int count,
@@ -230,14 +225,14 @@ static bool ImportMotionTable(const PortRemixExtraFighterInfo& info,
     uint64_t rom_offset = 0;
     if (!PatchPointerToRomOffset(patch_pointer, &rom_offset)) {
         port_log("SSB64 Remix: %s %s table has invalid patch pointer 0x%08X\n",
-                 info.display_name, table_name, patch_pointer);
+                 display_name, table_name, patch_pointer);
         return false;
     }
 
     std::vector<uint8_t> raw(static_cast<size_t>(count) * 12u);
     if (remix_extra_source_read(rom_offset, raw.data(), raw.size()) != raw.size()) {
         port_log("SSB64 Remix: %s %s table short read ptr=0x%08X count=%d\n",
-                 info.display_name, table_name, patch_pointer, count);
+                 display_name, table_name, patch_pointer, count);
         return false;
     }
 
@@ -249,13 +244,20 @@ static bool ImportMotionTable(const PortRemixExtraFighterInfo& info,
         const uint32_t raw_offset = ReadBE32(row + 4);
         const uint32_t anim_desc = ReadBE32(row + 8);
 
+        if (anim_file_id >= REMIX_EXTRA_RELOC_FILE_COUNT) {
+            port_log("SSB64 Remix: %s %s[%d] invalid animation RELOC id 0x%X\n",
+                     display_name, table_name, i, anim_file_id);
+            ok = false;
+        }
+
         FTMotionDesc& dst = (*output)[static_cast<size_t>(i)];
         dst.anim_file_id = anim_file_id;
-        dst.offset = ImportMotionOffset(info, table_name, i, raw_offset,
+        dst.offset = ImportMotionOffset(display_name, table_name, i, raw_offset,
                                         parent_table, parent_count, stats, &ok);
         dst.anim_desc.word = anim_desc;
 
         if (largest_anim != nullptr && anim_file_id != 0 &&
+            anim_file_id < REMIX_EXTRA_RELOC_FILE_COUNT &&
             !dst.anim_desc.flags.is_use_shieldpose) {
             const size_t anim_size = remix_extra_game_reloc_size(anim_file_id);
             *largest_anim = std::max(*largest_anim, anim_size);
@@ -264,35 +266,78 @@ static bool ImportMotionTable(const PortRemixExtraFighterInfo& info,
     return ok;
 }
 
-FTData* BuildNativeFTData(const PortRemixExtraFighterInfo& info,
-                          const FighterDescriptor& parent)
+static bool ReadGeneratedCharacterStruct(int fkind,
+                                         const char* display_name,
+                                         uint8_t (&raw_struct)[0x78],
+                                         uint64_t* out_struct_rom)
 {
-    const int index = FighterIndex(info.fkind);
+    uint32_t struct_pointer = 0;
+    if (!remix_extra_source_read_be32(
+            kCharacterStructTableRom + static_cast<uint64_t>(fkind) * 4ULL,
+            &struct_pointer)) {
+        port_log("SSB64 Remix: cannot read STRUCT_TABLE entry for %s fkind=0x%02X\n",
+                 display_name, fkind);
+        return false;
+    }
+
+    uint64_t struct_rom = 0;
+    if (!PatchPointerToRomOffset(struct_pointer, &struct_rom) ||
+        remix_extra_source_read(struct_rom, raw_struct, sizeof(raw_struct)) != sizeof(raw_struct)) {
+        port_log("SSB64 Remix: invalid Character struct pointer 0x%08X for %s fkind=0x%02X\n",
+                 struct_pointer, display_name, fkind);
+        return false;
+    }
+
+    if (out_struct_rom != nullptr) {
+        *out_struct_rom = struct_rom;
+    }
+    return true;
+}
+
+FTData* BuildNativeFTData(const PortRemixRosterInfo& roster,
+                          const FighterDescriptor& parent,
+                          const PortRemixExtraFighterInfo* extra_info)
+{
+    const int index = GeneratedIndex(roster.fkind);
     if (index < 0 || parent.ft_data == nullptr || !remix_extra_motion_init()) {
         return nullptr;
     }
 
     uint8_t raw_struct[0x78]{};
-    const uint32_t struct_rom = kExtraCharacterStructRomOffsets[index];
-    if (remix_extra_source_read(struct_rom, raw_struct, sizeof(raw_struct)) != sizeof(raw_struct)) {
-        port_log("SSB64 Remix: cannot read Character struct for %s at 0x%08X\n",
-                 info.display_name, struct_rom);
+    uint64_t struct_rom = 0;
+    if (!ReadGeneratedCharacterStruct(roster.fkind, roster.source_name,
+                                      raw_struct, &struct_rom)) {
         return nullptr;
     }
 
-    /* Refuse to build against a mismatched ROM/profile even if a stale source
-     * happened to pass a superficial size check. */
-    const int expected_ids[9] = {
-        info.main_file_id, info.primary_file_id, info.secondary_file_id,
-        info.character_file_id, info.shield_file_id,
-        info.misc_file_id[0], info.misc_file_id[1],
-        info.misc_file_id[2], info.misc_file_id[3]
+    int file_ids[9]{};
+    const char* slot_names[9] = {
+        "main", "primary", "secondary", "character", "shield",
+        "misc0", "misc1", "misc2", "misc3"
     };
+    bool assets_ok = true;
     for (int i = 0; i < 9; ++i) {
-        if (ReadBE32(raw_struct + i * 4) != static_cast<uint32_t>(expected_ids[i])) {
-            port_log("SSB64 Remix: %s Character struct file-id mismatch slot=%d\n",
-                     info.display_name, i);
-            return nullptr;
+        file_ids[i] = static_cast<int>(ReadBE32(raw_struct + i * 4));
+        assets_ok &= ValidateRelocFileId(roster.source_name, slot_names[i], file_ids[i]);
+    }
+    if (!assets_ok) {
+        return nullptr;
+    }
+
+    if (extra_info != nullptr) {
+        const int expected_ids[9] = {
+            extra_info->main_file_id, extra_info->primary_file_id,
+            extra_info->secondary_file_id, extra_info->character_file_id,
+            extra_info->shield_file_id, extra_info->misc_file_id[0],
+            extra_info->misc_file_id[1], extra_info->misc_file_id[2],
+            extra_info->misc_file_id[3]
+        };
+        for (int i = 0; i < 9; ++i) {
+            if (file_ids[i] != expected_ids[i]) {
+                port_log("SSB64 Remix: %s Character struct file-id mismatch slot=%d got=0x%X expected=0x%X\n",
+                         roster.source_name, i, file_ids[i], expected_ids[i]);
+                return nullptr;
+            }
         }
     }
 
@@ -308,7 +353,7 @@ FTData* BuildNativeFTData(const PortRemixExtraFighterInfo& info,
 
     if (mainmotion_count_u32 > 4096u) {
         port_log("SSB64 Remix: %s mainmotion count is unreasonable: %u\n",
-                 info.display_name, mainmotion_count_u32);
+                 roster.source_name, mainmotion_count_u32);
         return nullptr;
     }
 
@@ -318,7 +363,7 @@ FTData* BuildNativeFTData(const PortRemixExtraFighterInfo& info,
         !remix_extra_source_read_be32(submotion_count_rom, &submotion_count_u32) ||
         submotion_count_u32 > 4096u) {
         port_log("SSB64 Remix: %s invalid submotion count pointer 0x%08X\n",
-                 info.display_name, submotion_count_pointer);
+                 roster.source_name, submotion_count_pointer);
         return nullptr;
     }
 
@@ -334,38 +379,35 @@ FTData* BuildNativeFTData(const PortRemixExtraFighterInfo& info,
 
     MotionImportStats stats{};
     size_t largest_anim = 0;
-    if (!ImportMotionTable(info, "mainmotion", mainmotion_pointer,
+    if (!ImportMotionTable(roster.source_name, "mainmotion", mainmotion_pointer,
                            static_cast<int>(mainmotion_count_u32),
                            parent.ft_data->mainmotion, parent_main_count,
                            &runtime.mainmotion, &stats, &largest_anim) ||
-        !ImportMotionTable(info, "submotion", submotion_pointer,
+        !ImportMotionTable(roster.source_name, "submotion", submotion_pointer,
                            static_cast<int>(submotion_count_u32),
                            parent.ft_data->submotion, parent_sub_count,
                            &runtime.submotion, &stats, &largest_anim)) {
-        port_log("SSB64 Remix: native motion import failed for %s\n", info.display_name);
+        port_log("SSB64 Remix: native motion import failed for %s\n", roster.source_name);
         return nullptr;
     }
 
-    /* File slots 1-5 are safe to bind immediately. special1..4 deliberately
-     * remain parent-owned while their native status handlers are still being
-     * ported; their exact EXTRA IDs remain accessible through the asset API. */
-    runtime.data.file_main_id = static_cast<u32>(info.main_file_id);
-    runtime.data.file_mainmotion_id = static_cast<u32>(info.primary_file_id);
-    runtime.data.file_submotion_id = static_cast<u32>(info.secondary_file_id);
-    runtime.data.file_model_id = static_cast<u32>(info.character_file_id);
-    runtime.data.file_shieldpose_id = static_cast<u32>(info.shield_file_id);
+    /* Bind the files that the vanilla manager already understands natively.
+     * special1..4 remain parent-owned until their character-specific C/ASM
+     * status handlers are translated; the raw generated IDs stay available
+     * in the ROM struct and EXTRA asset API. */
+    runtime.data.file_main_id = static_cast<u32>(file_ids[0]);
+    runtime.data.file_mainmotion_id = static_cast<u32>(file_ids[1]);
+    runtime.data.file_submotion_id = static_cast<u32>(file_ids[2]);
+    runtime.data.file_model_id = static_cast<u32>(file_ids[3]);
+    runtime.data.file_shieldpose_id = static_cast<u32>(file_ids[4]);
 
-    runtime.data.file_main_size = remix_extra_game_reloc_size(static_cast<uint32_t>(info.main_file_id));
+    runtime.data.file_main_size = remix_extra_game_reloc_size(static_cast<uint32_t>(file_ids[0]));
     runtime.data.file_anim_size = (largest_anim != 0) ? largest_anim : parent.ft_data->file_anim_size;
 
     runtime.data.p_file_main = &runtime.file_main;
     runtime.data.p_file_mainmotion = &runtime.file_mainmotion;
     runtime.data.p_file_submotion = &runtime.file_submotion;
     runtime.data.p_file_model = &runtime.file_model;
-    /* The decomp treats p_file_shieldpose as the loaded file pointer itself
-     * after ftManagerSetupFilesKind, despite the historical FTData declaration
-     * being void**. Leave it null so that setup fills the real status-buffer
-     * pointer exactly as vanilla does. */
     runtime.data.p_file_shieldpose = nullptr;
     runtime.data.p_file_special1 = &runtime.file_special1;
     runtime.data.p_file_special2 = &runtime.file_special2;
@@ -385,8 +427,9 @@ FTData* BuildNativeFTData(const PortRemixExtraFighterInfo& info,
     runtime.submotion_count = static_cast<s32>(runtime.submotion.size());
     runtime.data.submotion_array_count = &runtime.submotion_count;
 
-    port_log("SSB64 Remix: native FTData %-16s main=%zu sub=%zu attr=0x%X anim_heap=%zu offsets[s=%d r=%d p=%d x=%d]\n",
-             info.display_name,
+    port_log("SSB64 Remix: native FTData %-16s fkind=0x%02X struct=0x%08llX main=%zu sub=%zu attr=0x%X anim_heap=%zu offsets[s=%d r=%d p=%d x=%d]\n",
+             roster.source_name, roster.fkind,
+             static_cast<unsigned long long>(struct_rom),
              runtime.mainmotion.size(), runtime.submotion.size(), attributes_offset,
              runtime.data.file_anim_size,
              stats.sentinel, stats.relative, stats.parent_absolute,
@@ -395,48 +438,68 @@ FTData* BuildNativeFTData(const PortRemixExtraFighterInfo& info,
     return &runtime.data;
 }
 
-void SeedBringupRow(const PortRemixExtraFighterInfo& info)
+void ApplySafeSynthPresentation(FighterDescriptor* desc,
+                                const PortRemixExtraFighterInfo* extra_info)
 {
-    const FighterDescriptor* parent = port_fighter_descriptor(info.parent_fkind);
-    if (parent == nullptr) {
-        port_log("SSB64 Remix: cannot seed %s (fkind=0x%02X); parent %d is missing\n",
-                 info.display_name, info.fkind, info.parent_fkind);
+    if (desc == nullptr) {
         return;
     }
 
-    FighterDescriptor desc = *parent;
-    FTData* native_data = BuildNativeFTData(info, *parent);
-    if (native_data == nullptr) {
-        port_log("SSB64 Remix: cannot materialize native FTData for %s\n", info.display_name);
-        return;
-    }
-    desc.ft_data = native_data;
-
-    /* Costume frames are present in the custom model, but CSS color mapping
-     * is enabled later together with the expanded CSS. */
-    desc.costume_count = 0;
-    desc.default_costumes = nullptr;
-    desc.default_costumes_count = 0;
-    for (unsigned char& costume : desc.team_costume) {
+    /* Expanded costume mapping and exact CSS tables are wired separately.
+     * Do not inherit a vanilla parent's costume/result identity accidentally. */
+    desc->costume_count = 0;
+    desc->default_costumes = nullptr;
+    desc->default_costumes_count = 0;
+    for (unsigned char& costume : desc->team_costume) {
         costume = 0xFF;
     }
 
-    desc.results_announce_fgm = 0;
-    desc.results_name = info.results_name;
-    desc.results_name_lx = info.results_name_lx;
-    desc.results_name_scale = info.results_name_scale;
-    desc.results_wins_lx = info.results_wins_lx;
-    desc.results_emblem_valid = 0;
-    desc.results_emblem_dobjdesc = 0;
-    desc.results_emblem_mobjsub = 0;
-    desc.results_emblem_matanim = 0;
+    desc->results_announce_fgm = 0;
+    desc->results_name = nullptr;
+    desc->results_name_lx = 0.0f;
+    desc->results_name_scale = 1.0f;
+    desc->results_wins_lx = 0.0f;
+    desc->results_emblem_valid = 0;
+    desc->results_emblem_dobjdesc = 0;
+    desc->results_emblem_mobjsub = 0;
+    desc->results_emblem_matanim = 0;
 
-    port_fighter_register(info.fkind, &desc);
+    if (extra_info != nullptr) {
+        desc->results_name = extra_info->results_name;
+        desc->results_name_lx = extra_info->results_name_lx;
+        desc->results_name_scale = extra_info->results_name_scale;
+        desc->results_wins_lx = extra_info->results_wins_lx;
+    }
+}
 
-    port_log("SSB64 Remix: seeded %-16s fkind=0x%02X parent=%d main=0x%04X model=0x%04X native-motion=1 mask=0x%03X\n",
-             info.display_name, info.fkind, info.parent_fkind,
-             info.main_file_id, info.character_file_id,
-             port_remix_extra_fighter_asset_mask(info.fkind));
+bool SeedGeneratedRow(const PortRemixRosterInfo& roster)
+{
+    const FighterDescriptor* parent = port_fighter_descriptor(roster.parent_fkind);
+    if (parent == nullptr || parent->ft_data == nullptr) {
+        port_log("SSB64 Remix: cannot seed %s (fkind=0x%02X); parent %d is missing\n",
+                 roster.source_name, roster.fkind, roster.parent_fkind);
+        return false;
+    }
+
+    const PortRemixExtraFighterInfo* extra_info = FindFighter(roster.fkind);
+    FighterDescriptor desc = *parent;
+    FTData* native_data = BuildNativeFTData(roster, *parent, extra_info);
+    if (native_data == nullptr) {
+        port_log("SSB64 Remix: cannot materialize native FTData for %s\n", roster.source_name);
+        return false;
+    }
+    desc.ft_data = native_data;
+    ApplySafeSynthPresentation(&desc, extra_info);
+
+    port_fighter_register(roster.fkind, &desc);
+
+    if (extra_info != nullptr) {
+        port_log("SSB64 Remix: seeded EXTRA %-12s fkind=0x%02X parent=%d main=0x%04X model=0x%04X mask=0x%03X\n",
+                 extra_info->display_name, roster.fkind, roster.parent_fkind,
+                 extra_info->main_file_id, extra_info->character_file_id,
+                 port_remix_extra_fighter_asset_mask(roster.fkind));
+    }
+    return port_fighter_descriptor(roster.fkind) != nullptr;
 }
 
 } // namespace
@@ -446,29 +509,42 @@ extern "C" {
 void port_remix_seed_fighters(void)
 {
     if (!remix_extra_source_exists()) {
-        port_log("SSB64 Remix: +EXTRA source absent; synth fighter registry not enabled\n");
+        port_log("SSB64 Remix: source absent; generated fighter registry not enabled\n");
         return;
     }
     if (!remix_extra_motion_init()) {
-        port_log("SSB64 Remix: +EXTRA motion arena unavailable; synth registry disabled\n");
+        port_log("SSB64 Remix: motion arena unavailable; generated fighter registry disabled\n");
         return;
     }
 
-    const int valid_assets = port_remix_extra_validate_fighter_assets();
-    int seeded = 0;
-    for (const PortRemixExtraFighterInfo& info : kExtraFighters) {
-        if (!ValidateRowAssets(info)) {
-            continue;
-        }
-        SeedBringupRow(info);
-        if (port_fighter_descriptor(info.fkind) != nullptr) {
-            ++seeded;
-        }
+    const int expected_roster = port_remix_roster_count();
+    if (expected_roster != kGeneratedFighterCount) {
+        port_log("SSB64 Remix: roster metadata mismatch got=%d expected=%d\n",
+                 expected_roster, kGeneratedFighterCount);
+        return;
     }
 
-    port_log("SSB64 Remix: +EXTRA 0.5.0 registry ready (%d/%d native rows, %d/%d asset layouts valid, motion_arena=%zu)\n",
-             seeded, kExtraFighterCount, valid_assets, kExtraFighterCount,
-             remix_extra_motion_arena_size());
+    int seeded = 0;
+    int base_seeded = 0;
+    int extra_seeded = 0;
+    int polygon_seeded = 0;
+
+    for (int i = 0; i < expected_roster; ++i) {
+        const PortRemixRosterInfo* roster = port_remix_roster_at(i);
+        if (roster == nullptr || !SeedGeneratedRow(*roster)) {
+            continue;
+        }
+        ++seeded;
+        if (roster->group == PORT_REMIX_ROSTER_BASE) ++base_seeded;
+        else if (roster->group == PORT_REMIX_ROSTER_EXTRA) ++extra_seeded;
+        else if (roster->group == PORT_REMIX_ROSTER_POLYGON) ++polygon_seeded;
+    }
+
+    const int valid_assets = port_remix_extra_validate_fighter_assets();
+    port_log("SSB64 Remix: generated registry ready total=%d/%d base=%d/48 extra=%d/19 polygons=%d/20 extra-assets=%d/19 motion_arena=%zu\n",
+             seeded, kGeneratedFighterCount,
+             base_seeded, extra_seeded, polygon_seeded,
+             valid_assets, remix_extra_motion_arena_size());
 }
 
 int port_remix_extra_fighter_count(void)
