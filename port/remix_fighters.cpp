@@ -1,6 +1,7 @@
 #include "remix_fighters.h"
 #include "fighter_registry.h"
 #include "port_log.h"
+#include "remix_extra_game_bridge.h"
 #include "remix_extra_reloc.h"
 #include "remix_extra_source.h"
 
@@ -9,15 +10,9 @@
 
 namespace {
 
-/*
- * Exact Smash Remix + EXTRA 0.5.0 roster metadata.
- *
- * Parent and costume values come from the 0.5.0
- * extra_characters/<fighter>/config.yaml files, not current/main +EXTRA.
- * The file IDs below were independently recovered from the final target ROM's
- * 19 generated Character structs and checked against the 0.5.0 generation
- * order. They therefore describe the exact ROM we are porting, not 0.6.0.
- */
+/* Exact Smash Remix + EXTRA 0.5.0 roster metadata. Parent/costume values come
+ * from the 0.5.0 sources. File IDs were recovered from the final target ROM's
+ * generated Character structs, so they describe the exact 0.5.0 ROM target. */
 static const PortRemixExtraFighterInfo kExtraFighters[] = {
     { PORT_REMIX_FKIND_BIRDO,        PORT_VANILLA_FKIND_JIGGLYPUFF, "Birdo",       "Birdo",            6,  "Birdo",       45.0f, 0.75f, 180.0f, 0x154F, 0x00F6, 0, 0x1550, 0x0154, { 0x1551, 0,      0,      0      } },
     { PORT_REMIX_FKIND_CB_KNUCKLES,  PORT_VANILLA_FKIND_FOX,        "CBKnuckles",  "Knuckles",         6,  "Knuckles",    25.0f, 0.75f, 180.0f, 0x1579, 0x00D0, 0, 0x157A, 0x013A, { 0x157B, 0x015A, 0x00A1, 0x157C } },
@@ -42,6 +37,35 @@ static const PortRemixExtraFighterInfo kExtraFighters[] = {
 
 constexpr int kExtraFighterCount =
     static_cast<int>(sizeof(kExtraFighters) / sizeof(kExtraFighters[0]));
+
+const PortRemixExtraFighterInfo* FindFighter(int fkind)
+{
+    if (fkind < PORT_REMIX_FKIND_BIRDO || fkind > PORT_REMIX_FKIND_YOUNG_ZELDA) {
+        return nullptr;
+    }
+    const int index = fkind - PORT_REMIX_FKIND_BIRDO;
+    if (index < 0 || index >= kExtraFighterCount) {
+        return nullptr;
+    }
+    const PortRemixExtraFighterInfo* info = &kExtraFighters[index];
+    return (info->fkind == fkind) ? info : nullptr;
+}
+
+int ResolveAssetFileId(const PortRemixExtraFighterInfo& info, int slot)
+{
+    switch (slot) {
+        case PORT_REMIX_ASSET_MAIN:      return info.main_file_id;
+        case PORT_REMIX_ASSET_PRIMARY:   return info.primary_file_id;
+        case PORT_REMIX_ASSET_SECONDARY: return info.secondary_file_id;
+        case PORT_REMIX_ASSET_CHARACTER: return info.character_file_id;
+        case PORT_REMIX_ASSET_SHIELD:    return info.shield_file_id;
+        case PORT_REMIX_ASSET_MISC0:     return info.misc_file_id[0];
+        case PORT_REMIX_ASSET_MISC1:     return info.misc_file_id[1];
+        case PORT_REMIX_ASSET_MISC2:     return info.misc_file_id[2];
+        case PORT_REMIX_ASSET_MISC3:     return info.misc_file_id[3];
+        default:                         return -1;
+    }
+}
 
 bool ValidateRelocId(const PortRemixExtraFighterInfo& info,
                      const char* slot_name, int file_id)
@@ -90,10 +114,9 @@ void SeedBringupRow(const PortRemixExtraFighterInfo& info)
 
     FighterDescriptor desc = *parent;
 
-    /* Parent-clone mode is deliberately conservative. The row gets a unique
-     * synth FTKind and exact asset metadata immediately, but its native FTData
-     * and status functions remain the vanilla parent until the N64 32-bit
-     * character struct has been reconstructed into BattleShip's LP64 layout. */
+    /* The synth has its exact FTKind and asset binding immediately. Native
+     * FTData/status functions remain inherited until their N64 32-bit data is
+     * reconstructed into BattleShip's native pointer layout. */
     desc.costume_count = 0;
     desc.default_costumes = nullptr;
     desc.default_costumes_count = 0;
@@ -101,9 +124,6 @@ void SeedBringupRow(const PortRemixExtraFighterInfo& info)
         costume = 0xFF;
     }
 
-    /* Never present the parent's results identity for a synth. Announcer and
-     * emblem stay disabled until the corresponding Remix audio/model assets
-     * are wired, while text geometry can already use the exact 0.5.0 values. */
     desc.results_announce_fgm = 0;
     desc.results_name = info.results_name;
     desc.results_name_lx = info.results_name_lx;
@@ -116,10 +136,11 @@ void SeedBringupRow(const PortRemixExtraFighterInfo& info)
 
     port_fighter_register(info.fkind, &desc);
 
-    port_log("SSB64 Remix: seeded %-16s fkind=0x%02X parent=%d main=0x%04X model=0x%04X costumes=%d\n",
+    port_log("SSB64 Remix: seeded %-16s fkind=0x%02X parent=%d main=0x%04X model=0x%04X costumes=%d mask=0x%03X\n",
              info.display_name, info.fkind, info.parent_fkind,
              info.main_file_id, info.character_file_id,
-             info.declared_costume_count);
+             info.declared_costume_count,
+             port_remix_extra_fighter_asset_mask(info.fkind));
 }
 
 } // namespace
@@ -165,22 +186,80 @@ const PortRemixExtraFighterInfo* port_remix_extra_fighter_at(int index)
 
 const PortRemixExtraFighterInfo* port_remix_extra_fighter_info(int fkind)
 {
-    if (fkind < PORT_REMIX_FKIND_BIRDO || fkind > PORT_REMIX_FKIND_YOUNG_ZELDA) {
-        return nullptr;
-    }
-
-    const int index = fkind - PORT_REMIX_FKIND_BIRDO;
-    if (index < 0 || index >= kExtraFighterCount) {
-        return nullptr;
-    }
-
-    const PortRemixExtraFighterInfo* info = &kExtraFighters[index];
-    return (info->fkind == fkind) ? info : nullptr;
+    return FindFighter(fkind);
 }
 
 int port_remix_extra_is_fighter(int fkind)
 {
-    return port_remix_extra_fighter_info(fkind) != nullptr ? 1 : 0;
+    return FindFighter(fkind) != nullptr ? 1 : 0;
+}
+
+int port_remix_extra_fighter_asset_file_id(int fkind, int asset_slot)
+{
+    const PortRemixExtraFighterInfo* info = FindFighter(fkind);
+    if (info == nullptr) {
+        return -1;
+    }
+    return ResolveAssetFileId(*info, asset_slot);
+}
+
+size_t port_remix_extra_fighter_asset_size(int fkind, int asset_slot)
+{
+    const int file_id = port_remix_extra_fighter_asset_file_id(fkind, asset_slot);
+    if (file_id <= 0) {
+        return 0;
+    }
+    return remix_extra_game_reloc_size(static_cast<uint32_t>(file_id));
+}
+
+int port_remix_extra_fighter_asset_available(int fkind, int asset_slot)
+{
+    const int file_id = port_remix_extra_fighter_asset_file_id(fkind, asset_slot);
+    if (file_id <= 0) {
+        return 0;
+    }
+    return remix_extra_game_reloc_size(static_cast<uint32_t>(file_id)) > 0 ? 1 : 0;
+}
+
+int port_remix_extra_fighter_load_asset(int fkind,
+                                        int asset_slot,
+                                        void* destination,
+                                        uint32_t destination_size,
+                                        int file_location,
+                                        int force_figatree_fixup)
+{
+    if (destination == nullptr) {
+        return 0;
+    }
+
+    const int file_id = port_remix_extra_fighter_asset_file_id(fkind, asset_slot);
+    if (file_id <= 0) {
+        return 0;
+    }
+
+    const size_t required = remix_extra_game_reloc_size(static_cast<uint32_t>(file_id));
+    if (required == 0 || required > destination_size) {
+        port_log("SSB64 Remix: asset load rejected fkind=0x%02X slot=%d file=0x%04X required=%zu destination=%u\n",
+                 fkind, asset_slot, file_id, required, destination_size);
+        return 0;
+    }
+
+    return remix_extra_game_load_reloc(static_cast<uint32_t>(file_id),
+                                       destination,
+                                       destination_size,
+                                       file_location,
+                                       force_figatree_fixup);
+}
+
+uint32_t port_remix_extra_fighter_asset_mask(int fkind)
+{
+    uint32_t mask = 0;
+    for (int slot = 0; slot < PORT_REMIX_ASSET_COUNT; ++slot) {
+        if (port_remix_extra_fighter_asset_available(fkind, slot)) {
+            mask |= (1u << static_cast<uint32_t>(slot));
+        }
+    }
+    return mask;
 }
 
 int port_remix_extra_validate_fighter_assets(void)
