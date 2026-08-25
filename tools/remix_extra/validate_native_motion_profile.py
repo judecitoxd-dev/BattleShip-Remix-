@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Validate assumptions used by the native +EXTRA fighter motion importer.
+"""Validate the native motion importer across the full generated roster.
 
-Metadata-only diagnostic: it never writes or exports copyrighted ROM payloads.
-Pinned to Smash Remix 2.0.1 + EXTRA 0.5.0.
+Metadata-only diagnostic pinned to Smash Remix 2.0.1 + EXTRA 0.5.0. It walks
+Character.STRUCT_TABLE rows 0x1D..0x73 (48 Remix + 19 EXTRA + 20 polygons),
+checks the generated 0x78-byte FTData layout, validates animation RELOC ids and
+classifies every motion pointer against the native importer rules.
 """
 from __future__ import annotations
 
@@ -15,23 +17,34 @@ from pathlib import Path
 EXPECTED_SHA1 = "b9aa8800f9676e6edc454ec3cf9790ab2c229cac"
 EXPECTED_SIZE = 80_312_584
 PATCH_RAM_ROM_DELTA = 0x7CC00000
-MOTION_RAW_BASE = 0x805C0000
+STRUCT_TABLE_ROM = 0x00092610
+FKIND_FIRST = 0x1D
+FKIND_LAST = 0x73
+MOTION_RAW_BASE = 0x80570000
 MOTION_RAW_END = 0x80610000
 RELOC_TABLE = 0x001AC870
 RELOC_COUNT = 7479
 
-FIGHTERS = [
-    ("Birdo",       0x038E2120), ("CBKnuckles",  0x038E2DE0),
-    ("CBMKnuckles", 0x038E3D50), ("Cloud",       0x038E4CC0),
-    ("DKUlt",       0x038E5A70), ("Kazuya",      0x038E68B0),
-    ("Ken",         0x038E78E0), ("Knuckles",    0x038E88F0),
-    ("MKnuckles",   0x038E9860), ("MRGAW",       0x038EA7D0),
-    ("MRGAWPLUS",   0x038EB5C0), ("MRGAWTHREED", 0x038EC3D0),
-    ("MetaKnight",  0x038ED1E0), ("Rebecca",     0x038EE050),
-    ("Ryu",         0x038EEE10), ("Snake",       0x038EFDC0),
-    ("Spiderman",   0x038F10F0), ("Terry",       0x038F1EE0),
-    ("YZelda",      0x038F2EB0),
+BASE_NAMES = [
+    "FALCO", "GND", "YLINK", "DRM", "WARIO", "DSAMUS", "ELINK", "JSAMUS",
+    "JNESS", "LUCAS", "JLINK", "JFALCON", "JFOX", "JMARIO", "JLUIGI", "JDK",
+    "EPIKA", "JPUFF", "EPUFF", "JKIRBY", "JYOSHI", "JPIKA", "ESAMUS", "BOWSER",
+    "GBOWSER", "PIANO", "WOLF", "CONKER", "MTWO", "MARTH", "SONIC", "SANDBAG",
+    "SSONIC", "SHEIK", "MARINA", "DEDEDE", "GOEMON", "PEPPY", "SLIPPY", "BANJO",
+    "MLUIGI", "EBI", "DRAGONKING", "CRASH", "PEACH", "ROY", "DRL", "LANKY",
 ]
+EXTRA_NAMES = [
+    "Birdo", "CBKnuckles", "CBMKnuckles", "Cloud", "DKUlt", "Kazuya", "Ken",
+    "Knuckles", "MKnuckles", "MRGAW", "MRGAWPLUS", "MRGAWTHREED", "MetaKnight",
+    "Rebecca", "Ryu", "Snake", "Spiderman", "Terry", "YZelda",
+]
+POLYGON_NAMES = [
+    "NWARIO", "NLUCAS", "NBOWSER", "NWOLF", "NDRM", "NSONIC", "NSHEIK",
+    "NMARINA", "NFALCO", "NGND", "NDSAMUS", "NMARTH", "NMTWO", "NDEDEDE",
+    "NYLINK", "NGOEMON", "NCONKER", "NBANJO", "NPEACH", "NCRASH",
+]
+NAMES = BASE_NAMES + EXTRA_NAMES + POLYGON_NAMES
+assert len(NAMES) == FKIND_LAST - FKIND_FIRST + 1 == 87
 
 
 def be32(data: bytes, off: int) -> int:
@@ -64,6 +77,14 @@ def classify_offset(value: int) -> str:
     return "unsupported"
 
 
+def group_for_fkind(fkind: int) -> str:
+    if fkind <= 0x4C:
+        return "remix"
+    if fkind <= 0x5F:
+        return "extra"
+    return "polygon"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("rom", type=Path)
@@ -86,8 +107,17 @@ def main() -> int:
     }
     fighters: list[dict] = []
 
-    for index, (name, struct_off) in enumerate(FIGHTERS):
+    for index, name in enumerate(NAMES):
+        fkind = FKIND_FIRST + index
+        struct_ptr = be32(rom, STRUCT_TABLE_ROM + fkind * 4)
+        struct_off = ptr_to_rom(struct_ptr)
+        if struct_off < 0 or struct_off + 0x78 > len(rom):
+            raise SystemExit(f"{name}: Character struct outside ROM")
+
         ids = struct.unpack_from(">9I", rom, struct_off)
+        if any(fid >= RELOC_COUNT for fid in ids if fid):
+            raise SystemExit(f"{name}: invalid generated file id")
+
         main_ptr = be32(rom, struct_off + 0x64)
         sub_ptr = be32(rom, struct_off + 0x68)
         main_count = be32(rom, struct_off + 0x6C)
@@ -122,8 +152,8 @@ def main() -> int:
                         f"offset 0x{motion_offset:08X}"
                     )
 
-                # FTANIM_FLAG_SHIELDPOSE is logical bit 1. For shieldpose rows
-                # anim_file_id is not an ordinary RELOC animation file id.
+                # FTANIM_FLAG_SHIELDPOSE is logical bit 1. Shieldpose rows do
+                # not use anim_file_id as an ordinary animation RELOC id.
                 if anim_file_id and not (anim_desc & 0x2):
                     size = reloc_size(rom, anim_file_id)
                     if size == 0:
@@ -136,7 +166,8 @@ def main() -> int:
         fighters.append(
             {
                 "name": name,
-                "fkind": 0x61 + index,
+                "fkind": fkind,
+                "group": group_for_fkind(fkind),
                 "character_struct_rom_offset": struct_off,
                 "file_ids": list(ids),
                 "attributes_offset": be32(rom, struct_off + 0x60),
@@ -148,26 +179,28 @@ def main() -> int:
         )
 
     expected_totals = {
-        "sentinel": 700,
-        "relative": 2415,
-        "parent_absolute": 23,
-        "remix_absolute": 1512,
+        "sentinel": 3550,
+        "relative": 11651,
+        "parent_absolute": 173,
+        "remix_absolute": 5296,
         "unsupported": 0,
     }
     if totals != expected_totals:
         raise SystemExit(f"Profile totals changed: {totals} != {expected_totals}")
 
-    meta = fighters[12]
+    meta = fighters[0x59 - FKIND_FIRST]
     if (meta["name"], meta["fkind"], meta["mainmotion_count"], meta["submotion_count"]) != (
-        "MetaKnight", 0x6D, 225, 15
+        "MetaKnight", 0x59, 225, 15
     ):
         raise SystemExit("Meta Knight profile anchor mismatch")
 
     print(json.dumps({
         "profile": "Smash Remix 2.0.1 + EXTRA 0.5.0",
         "sha1": got_sha1,
+        "fkind_range": [FKIND_FIRST, FKIND_LAST],
         "motion_raw_range": [MOTION_RAW_BASE, MOTION_RAW_END],
         "fighter_count": len(fighters),
+        "group_counts": {"remix": 48, "extra": 19, "polygon": 20},
         "motion_rows": sum(totals.values()),
         "offset_classes": totals,
         "fighters": fighters,
