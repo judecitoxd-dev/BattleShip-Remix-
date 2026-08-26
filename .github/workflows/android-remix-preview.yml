@@ -1,0 +1,55 @@
+name: Android Remix Preview
+
+on:
+  push:
+    branches: [remix-test-apk]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android arm64 preview
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android build deps
+        run: sudo apt-get update && sudo apt-get install -y python3-pil
+      - name: Install Android SDK + NDK r29
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 ndk;29.0.14206865'
+      - name: Generate f3d.o2r
+        working-directory: libultraship/src/fast
+        run: cmake -E tar cf "$GITHUB_WORKSPACE/f3d.o2r" --format=zip shaders
+      - name: Build arm64 preview APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleRelease -Pssb64.abis=arm64-v8a
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          apk=(android/app/build/outputs/apk/release/app-release*.apk)
+          if (( ${#apk[@]} == 0 )); then
+            echo "::error::no APK produced"
+            find android/app/build/outputs -maxdepth 5 -type f -print || true
+            exit 1
+          fi
+          cp "${apk[0]}" dist/BattleShip-Remix-preview-arm64.apk
+          sha256sum dist/BattleShip-Remix-preview-arm64.apk > dist/BattleShip-Remix-preview-arm64.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BattleShip-Remix-preview-arm64
+          path: |
+            dist/BattleShip-Remix-preview-arm64.apk
+            dist/BattleShip-Remix-preview-arm64.apk.sha256
+          if-no-files-found: error
