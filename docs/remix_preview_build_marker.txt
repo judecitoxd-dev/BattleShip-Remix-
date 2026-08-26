@@ -1,0 +1,3 @@
+Android Remix preview build trigger.
+Branch: remix-test-apk
+Purpose: produce an arm64 sideload APK without modifying main.
